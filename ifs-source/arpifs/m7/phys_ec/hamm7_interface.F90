@@ -1,6 +1,6 @@
 SUBROUTINE HAMM7_INTERFACE( &
  & YDMODEL,   KIDIA,     KFDIA,     KLON,        KTDIA,    KLEV,     KTILES,  &
- & KFLDX,     KLEVX,     KTRAC,     KAERO,       KCHEM,    KSTGLO,   PGEOH,   &
+ & KFLDX,     KLEVX,     KTRAC,     KAERO,       KCHEM,    KSTGLO,   PGEOH,   PGEOM1, &
  & PRS1,      PRSF1,     PAEROP,    PCAERO,      PCEN,     PAPHIF,            &
  & PFPLCL,    PFPLCN,    PFPLSL,    PFPLSN,      PGELAT,   PGELAM,            &
  & PAP,       PIP,       PLP,       PRP,         PSP,      PCOVPTOT,          &
@@ -13,9 +13,10 @@ SUBROUTINE HAMM7_INTERFACE( &
  & PAER_TAU,  PAER_SSA,  PAER_ASYM, PAER_TAU_LW,                              &
  & PTAUS_AER, PTAUA_AER, PPMAER,                                              &
  & PEXTRA,    PVERVEL,   PCCNL,     PCCNO,       PAHFSTI,  PCI,      PZ0M,    &
- & PAHFLEV,   PUP,       PVP,       PCVL,        PCVH,     PSO2DD,   PGEMU,   &
- & PBLH,      PSNOWACL,  KCTOP,     KCBOT,                                    &
- & PAEPM1,    PAEPM25,   PAEPM10)
+ & PAHFLEV,   PUP,       PVP,       PHSTD,       POROSIG,  POROGAM,  POROTHE, &
+ & PCVL,      PCVH,      PSO2DD,    PGEMU,                                    &
+ & PBLH,      PSNOWACL,  PICEPROC,  KCTOP,     KCBOT,                         &
+ & PAEPM1,    PAEPM25,   PAEPM10,  PTP0,     PQP0)
 
 ! ╭────────────────────────────────────────────────────────────────────────────╮
 ! │                                                      (updated 30-APR-2024) │
@@ -174,7 +175,7 @@ USE OIFS_TO_HAM,             ONLY: ind_oifs_ham
 USE MO_HAM_SUBM,             ONLY: HAM_SUBM_INTERFACE                   ! replaced HAM-M7 call with submodel interface
 USE MO_ACTIV,                ONLY: activ_updraft,nw, idt_cdnc, idt_icnc ! HAM-M7 activation updraft calculation, effective radii
 USE MO_HAM_ACTIV,            ONLY: ham_activ_abdulrazzak_ghan, ham_activ_koehler_ab ! HAM-M7 activation
-USE MO_PARAM_SWITCHES,       ONLY: ncd_activ        ! for activation
+USE MO_PARAM_SWITCHES,       ONLY: ncd_activ, nic_cirrus, lorocirrus
 USE MO_TRACDEF,              ONLY: ntrac, trlist    ! number of tracer for mass/number mixing ratio conversion, trlist for wet deposition flags
 USE MO_TRACER_PROCESSES,     ONLY: xt_borrow, xt_conv_massfix ! conserving the negative tracer values from tendency, and convective case
 USE MO_TIME_CONTROL,         ONLY: time_step_len    ! time step length for tendency
@@ -183,6 +184,7 @@ USE MO_HAM_WETDEP,           ONLY: ham_conv_lfraq_so2
 USE MO_HAMMOZ_SEDIMENTATION, ONLY: sedi_interface   ! sedimentation interface call
 USE MO_HAMMOZ_DRYDEP,        ONLY: drydep_interface ! dry deposition interface call
 USE MO_HAM_RAD,              ONLY: ham_rad,ham_rad_cache_cleanup,ham_rad_cache
+USE MO_OIFS_OROCIRRUS,       ONLY: OIFS_OROCIRRUS_UPDRAFT
 
 USE YOE_AER_ACTIV,           ONLY: AER_ACTIV ! M&N activation scheme
 
@@ -206,6 +208,7 @@ INTEGER(KIND=JPIM), INTENT(IN) :: KCTOP(KLON) ! cloud top level index
 INTEGER(KIND=JPIM), INTENT(IN) :: KCBOT(KLON) ! cloud bottom level index
 
 REAL(KIND=JPRB),INTENT(IN)    :: PGEOH(KLON,0:KLEV)
+REAL(KIND=JPRB),INTENT(IN)    :: PGEOM1(KLON,KLEV)
 REAL(KIND=JPRB),INTENT(IN)    :: PRSF1(KLON,KLEV), PRS1(KLON,0:KLEV), PAPHIF(KLON,KLEV)
 REAL(KIND=JPRB),INTENT(IN)    :: PAP(KLON,KLEV), PIP(KLON,KLEV), PLP(KLON,KLEV), PLU(KLON,KLEV)
 REAL(KIND=JPRB),INTENT(IN)    :: PRP(KLON,KLEV), PSP(KLON,KLEV), PCOVPTOT(KLON,KLEV)
@@ -231,11 +234,15 @@ REAL(KIND=JPRB),INTENT(IN)    :: PZ0M(KLON) ! roughness length for momentum for 
 REAL(KIND=JPRB),INTENT(IN)    :: PAHFLEV(KLON) ! latent heat flux for dry deposition
 REAL(KIND=JPRB),INTENT(IN)    :: PUP(KLON,KLEV) ! u component of wind
 REAL(KIND=JPRB),INTENT(IN)    :: PVP(KLON,KLEV) ! v component of wind
+REAL(KIND=JPRB),INTENT(IN)    :: PHSTD(KLON), POROSIG(KLON), POROGAM(KLON), POROTHE(KLON)
 REAL(KIND=JPRB),INTENT(IN)    :: PCVL(KLON) ! low vegetation cover
 REAL(KIND=JPRB),INTENT(IN)    :: PCVH(KLON) ! high vegetation cover
 REAL(KIND=JPRB),INTENT(IN)    :: PGEMU(KLON) ! sine of latitude
 REAL(KIND=JPRB),INTENT(IN)    :: PMFU(KLON,KLEV)  ! Conv. mass flux up
 REAL(KIND=JPRB),INTENT(IN)    :: PSNOWACL(KLON,KLEV)  ! accretion rate of snow with cloud droplets
+REAL(KIND=JPRB),INTENT(IN)    :: PICEPROC(KLON,KLEV,5) ! fall, aggregation, melt, detrainment, secondary ice
+REAL(KIND=JPRB),INTENT(IN)    :: PTP0(KLON,KLEV) ! temperature at the start of the timestep
+REAL(KIND=JPRB),INTENT(IN)    :: PQP0(KLON,KLEV) ! specific humidity at the start of the timestep
 REAL(KIND=JPRB),INTENT(INOUT) :: PTENC(KLON,KLEV,KTRAC)
 REAL(KIND=JPRB),INTENT(INOUT) :: PAERDDP(KLON,YDMODEL%YRML_GCONF%YGFL%NACTAERO)
 REAL(KIND=JPRB),INTENT(INOUT) :: PAERSDM(KLON,YDMODEL%YRML_GCONF%YGFL%NACTAERO)
@@ -320,10 +327,12 @@ REAL(KIND=JPRB) :: ZTMPA
 
 LOGICAL         :: LLIQCLD(KLON,KLEV) ! logical for liquid cloud
 LOGICAL         :: LICECLD(KLON,KLEV) ! logical for ice cloud
+LOGICAL, PARAMETER :: ICENUCL = .TRUE. ! enable the HAM ice-nucleation parameterisation
 
 REAL(KIND=JPRB), PARAMETER :: ZEPSEC=1e-14_JPRB
 REAL(KIND=JPRB), PARAMETER :: ZMIN_CDNC=10.0_JPRB               !eehol: minimum CDNC (can be changed but for now 10 cm-3)
 REAL(KIND=JPRB), PARAMETER :: ZDEF_CDNC=125.0_JPRB              !eehol: default CDNC (can be changed but for now 125 cm-3)
+REAL(KIND=JPRB), PARAMETER :: ZMIN_ICNC=10.0_JPRB               ! minimum ICNC for ice-nucleation output [m-3]
 REAL(KIND=JPRB), PARAMETER :: ZDEF_RE_LIQ=4.0_JPRB              !eehol: default liq eff radius (can be changed but for now 4 mu m comes from liquid effective radius routine (PP_MIN_RE_UM))
 REAL(KIND=JPRB), PARAMETER :: ZDEF_RE_ICE=80._JPRB*0.64952_JPRB !eehol: default ice eff radius (comes from ice effective radius routine (ZDEFAULT_RE_UM))
 REAL(KIND=JPRB), PARAMETER :: ZTUNPAR=0.8164965_JPRB            !eehol: tuning parameter for sigma_w derived from TKE (square root of 2/3 (isotropy assumption))
@@ -350,6 +359,7 @@ REAL(KIND=JPRB) :: ZTKEM1(KLON,KLEV) !turbulent kinetic energy  as zero as it is
 REAL(KIND=JPRB) :: ZSIGMA_W(KLON,KLEV) !standard deviation of updraft pdf
 REAL(KIND=JPRB) :: ZSMAXMN(KLON,KLEV) !maximum supersaturation for M&N scheme
 REAL(KIND=JPRB) :: ZWCAPE(KLON) !CAPE  as zero as it is not used
+REAL(KIND=JPRB) :: ZCIRRUS_W(KLON,KLEV) ! cirrus nucleation updraft [cm/s]
 REAL(KIND=JPRB) :: ZRDRY(KLON,KLEV,nclass) !dry radius for each class
 REAL(KIND=JPRB) :: ZESW(KLON,KLEV) !saturation water vapor pressure
 REAL(KIND=JPRB) :: ZA(KLON,KLEV,nclass) !curvature parameter A of the Koehler equation
@@ -469,6 +479,7 @@ REAL(KIND=JPRB) :: ZABS_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG), ZASY_
 #include "troplev.intfb.h"
 #include "chem_inext.intfb.h"
 #include "ice_effective_radius.intfb.h"
+#include "ice_interface.intfb.h"
 
 !-----------------------------------------------------------------------
 IF (LHOOK) CALL DR_HOOK('HAMM7_INTERFACE',0,ZHOOK_HANDLE)
@@ -1035,9 +1046,31 @@ ENDDO
          ZFRACN(KIDIA:KFDIA,1:KLEV,JCLASS) = MERGE(ZFRACN(KIDIA:KFDIA,1:KLEV,JCLASS),0._JPRB,LLIQCLD(KIDIA:KFDIA,1:KLEV))
        ENDDO
 
-       ! threshold CDNC and ICNC to grid cells with only liquid or ice clouds
+       ZCIRRUS_W(KIDIA:KFDIA,:) = -100._JPRB*PVERVEL(KIDIA:KFDIA,:) &
+         & /(RG*ZRHO(KIDIA:KFDIA,:)) &
+         & + 70._JPRB*SQRT(MAX(ZTKEM1(KIDIA:KFDIA,:),0._JPRB))
+       IF (nic_cirrus == 2 .AND. lorocirrus) THEN
+         CALL OIFS_OROCIRRUS_UPDRAFT( &
+           & YDMODEL%YRML_PHY_SLIN%YREPHLI,YDMODEL%YRML_PHY_EC%YREGWD, &
+           & KIDIA,KFDIA,KLON,KLEV,PRS1,PRSF1,PGEOM1,PTP0,PQP0,PUP,PVP, &
+           & PHSTD,POROGAM,POROTHE,POROSIG,1._JPRB/ZRHO,PVERVEL,ZCIRRUS_W)
+       END IF
+
+       CALL ICE_INTERFACE( &
+         & KIDIA,        KFDIA,        KLON,        KTDIA,        KLEV,             &
+         & ICENUCL,      nic_cirrus,                                                &
+         & PAP,          PIP,          PLP,         PTP,          PTP0,      PQP0,  &
+         & PRS1,         PRSF1,        PVERVEL,     ZCIRRUS_W,                       &
+         & ZRHO,         ZAP,          ZTKEM1,                                        &
+         & ZXTM1,        ZXTTE,        ZM6RP,                                         &
+         & ZNACT,                                                                    &
+         & PGFL(1:KLON,1:KLEV,YICNC%MP9_PH),                                        &
+         & PGFL(1:KLON,1:KLEV,YRE_ICE%MP9_PH),                                      &
+         & LICECLD,      PSNOWACL,    PICEPROC,                                      &
+         & RNICE,                                                                    &
+         & ZICNC,        ZCDNCACT )
+
        ZCDNCACT(KIDIA:KFDIA,1:KLEV) = MERGE(ZCDNCACT(KIDIA:KFDIA,1:KLEV),1.0E6_JPRB*ZDEF_CDNC,LLIQCLD(KIDIA:KFDIA,1:KLEV)) !mask only values inside liq cloud
-       ZICNC(KIDIA:KFDIA,1:KLEV) = MERGE(ZICNC(KIDIA:KFDIA,1:KLEV), RNICE, LICECLD(KIDIA:KFDIA,1:KLEV)) !mask only values inside ice cloud
 
     ELSE !Default values if no activation scheme is used
       
@@ -1096,10 +1129,14 @@ ENDDO
     
     ! Store CDNC (number of activated particles) and ICNC as a number mixing ratio to tracer values, and in PGFL
     ZXTM1(KIDIA:KFDIA,1:KLEV,IDT_CDNC) = (MAX(ZCDNCACT(KIDIA:KFDIA,1:KLEV),((1.0E6_JPRB)*ZMIN_CDNC)))/ZRHO(KIDIA:KFDIA,1:KLEV) ! [#/kg] and threshold CDNC
-    ZXTM1(KIDIA:KFDIA,1:KLEV,IDT_ICNC) = (1.0E6_JPRB)*ZICNC(KIDIA:KFDIA,1:KLEV)/ZRHO(KIDIA:KFDIA,1:KLEV) !ice crystal number conc = #/cm3 --> number mix rat [#/kg]
-
     PGFL(KIDIA:KFDIA,1:KLEV,YCDNC%MP9_PH) = MAX((1.0E-6_JPRB)*ZCDNCACT(KIDIA:KFDIA,1:KLEV),ZMIN_CDNC)  ! convert from #/m3 to #/cm3 and threshold minimum value to 1 cm-3
-    PGFL(KIDIA:KFDIA,1:KLEV,YICNC%MP9_PH) = MAX( ZICNC(KIDIA:KFDIA,1:KLEV), RNICE) ! no conversion needed: already in #/cm3, just impose minimum value
+    IF (ICENUCL) THEN
+      ZXTM1(KIDIA:KFDIA,1:KLEV,IDT_ICNC) = ZICNC(KIDIA:KFDIA,1:KLEV)/ZRHO(KIDIA:KFDIA,1:KLEV) ! ice nucleation uses #/m3
+      PGFL(KIDIA:KFDIA,1:KLEV,YICNC%MP9_PH) = 1.0E-6_JPRB * MAX(ZICNC(KIDIA:KFDIA,1:KLEV),ZMIN_ICNC)
+    ELSE
+      ZXTM1(KIDIA:KFDIA,1:KLEV,IDT_ICNC) = (1.0E6_JPRB)*ZICNC(KIDIA:KFDIA,1:KLEV)/ZRHO(KIDIA:KFDIA,1:KLEV) ! ice crystal number conc. in #/cm3
+      PGFL(KIDIA:KFDIA,1:KLEV,YICNC%MP9_PH) = MAX(ZICNC(KIDIA:KFDIA,1:KLEV),RNICE)
+    END IF
 
     !eehol: update tendency of CDNC and ICNC (calculate only the newly formed droplets)
     ZXTTE_CLD(KIDIA:KFDIA,1:KLEV,IDT_CDNC) = (ZXTM1(KIDIA:KFDIA,1:KLEV,IDT_CDNC) - ZCDNC_temp(KIDIA:KFDIA,1:KLEV))/time_step_len

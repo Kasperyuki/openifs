@@ -161,6 +161,7 @@ USE YOEAEROP          , ONLY : STRATO_CMIP_NMONTH, STRATO_CMIP_NTB,             
      &                         CHECK_SUN_MEAN, CHECK_EARTH_MEAN,                    &
      &                         STRATO_FIRSTYEAR, STRATO_LASTYEAR, STRATO_CMIP_NTIME
 USE ND_PARAM          , ONLY : ND_PARAM_SETUP
+USE MO_PARAM_SWITCHES, ONLY : NIC_CIRRUS, LOROCIRRUS, LSECPROD
 !-------------------------------------------------------------------------------
 
 IMPLICIT NONE
@@ -549,6 +550,9 @@ LSTRATAERO_UPDATED = .FALSE.
 NCLOUDACT= 0   ! 0:  effective radius from IFS code and default activation
                ! 1: use Morales & Nenes activation scheme from HAMM7
                ! 2: use Abdul-Razzak & Ghan activation scheme from HAMM7
+NIC_CIRRUS = 1 ! 1: Lohmann saturation-limited scheme; 2: Kaercher-Lohmann
+LOROCIRRUS = .FALSE. ! use native OIFS orographic GWD updraft with NIC_CIRRUS=2
+LSECPROD = .FALSE. ! riming-driven Hallett-Mossop secondary ice production
 
 ! Computation of M7 aerosols optical properties
 NAEROOPT = 2 ! 2: HAM optics (faster and calculated for LW too)
@@ -1131,6 +1135,16 @@ ENDIF
 ! (Meteo-France operational model)
 CALL POSNAM(NULNAM,'NAERAD')
 READ (NULNAM,NAERAD)
+
+IF (NIC_CIRRUS /= 1 .AND. NIC_CIRRUS /= 2) THEN
+  CALL ABOR1('SUECRAD: NIC_CIRRUS must be 1 or 2')
+ENDIF
+IF (LOROCIRRUS .AND. NIC_CIRRUS /= 2) THEN
+  CALL ABOR1('SUECRAD: LOROCIRRUS requires NIC_CIRRUS=2')
+ENDIF
+IF (LSECPROD .AND. (TRIM(AERO_SCHEME) /= 'hamm7' .OR. NCLOUDACT /= 2)) THEN
+  CALL ABOR1('SUECRAD: LSECPROD requires AERO_SCHEME=hamm7 and NCLOUDACT=2')
+ENDIF
 
 IF (NGHGRAD < 0) THEN
   IF ((LEPHYS .AND. .NOT. LARPEGEF) .OR. LRAYFM) THEN
@@ -2627,6 +2641,9 @@ IF (LOUTPUT) THEN
 !  IF ( TRIM(AERO_SCHEME) == "hamm7" ) THEN
     WRITE(UNIT=KULOUT,FMT='('' NCLOUDACT (M7) = '',I1)') NCLOUDACT
     WRITE(UNIT=KULOUT,FMT='('' NAEROOPT (M7)  = '',I1)') NAEROOPT
+    WRITE(UNIT=KULOUT,FMT='('' NIC_CIRRUS (M7) = '',I1)') NIC_CIRRUS
+    WRITE(UNIT=KULOUT,FMT='('' LOROCIRRUS (M7) = '',L5)') LOROCIRRUS
+    WRITE(UNIT=KULOUT,FMT='('' LSECPROD (M7) = '',L5)') LSECPROD
 !  ELSE
 !    WRITE(UNIT=KULOUT,FMT='(A)') 'NCLOUDACT/NAEROOPT not used'
 !  ENDIF

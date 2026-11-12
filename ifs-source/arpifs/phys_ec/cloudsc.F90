@@ -40,7 +40,7 @@ SUBROUTINE CLOUDSC &
  & PFSQRF,   PFSQSF ,  PFCQRNG,  PFCQSNG, &
  & PFSQLTUR, PFSQITUR , &
  & PFPLSL,   PFPLSN,   PFHPSL,   PFHPSN, &
- & PEXTRA,   KFLDX,    PSNOWACL)
+ & PEXTRA,   KFLDX,    PSNOWACL, PICEPROC)
 
 !===============================================================================
 !**** *CLOUDSC* -  ROUTINE FOR PARAMETRIZATION OF CLOUD PROCESSES
@@ -182,8 +182,14 @@ USE YOECUMF  , ONLY : TECUMF
 USE YOEVDF   , ONLY : TVDF
 USE SPP_MOD     , ONLY : TSPP_CONFIG
 USE SPP_GEN_MOD , ONLY : SPP_PERT
+USE MO_PARAM_SWITCHES, ONLY : LSECPROD
 
 IMPLICIT NONE
+
+INTEGER(KIND=JPIM), PARAMETER :: JPICE_FALL=1, JPICE_AGG=2, JPICE_MELT=3, JPICE_DETR=4, JPICE_SEC=5
+REAL(KIND=JPRB), PARAMETER :: ZSEC_TMIN=265.2_JPRB, ZSEC_TMAX=270.2_JPRB
+REAL(KIND=JPRB), PARAMETER :: ZSEC_SPLINTER_YIELD=0.00285_JPRB
+REAL(KIND=JPRB), PARAMETER :: ZSEC_ICE_MASS=1.E-12_JPRB, ZSEC_DROP_MASS=4.19E-12_JPRB
 
 !-------------------------------------------------------------------------------
 !                 Declare input/output arguments
@@ -268,6 +274,7 @@ REAL(KIND=JPRB)   ,INTENT(OUT)   :: PFPLSN(KLON,KLEV+1) ! ice+snow sedim flux
 REAL(KIND=JPRB)   ,INTENT(OUT)   :: PFHPSL(KLON,KLEV+1) ! Enthalpy flux for liq
 REAL(KIND=JPRB)   ,INTENT(OUT)   :: PFHPSN(KLON,KLEV+1) ! Enthalp flux for ice
 REAL(KIND=JPRB)   ,INTENT(INOUT) :: PSNOWACL(KLON,KLEV) ! accretion rate of snow with cloud droplets
+REAL(KIND=JPRB)   ,INTENT(OUT)   :: PICEPROC(KLON,KLEV,5) ! fall, aggregation, melt, detrainment, secondary ice
 ! Extra fields for diagnostics
 REAL(KIND=JPRB)   ,INTENT(INOUT) :: PEXTRA(KLON,KLEV,KFLDX) ! extra fields
 INTEGER(KIND=JPIM),INTENT(IN)    :: KFLDX ! Number of extra fields
@@ -504,6 +511,7 @@ REAL(KIND=JPRB) :: ZRAINACC(KLON)
 REAL(KIND=JPRB) :: ZRAINCLD(KLON)
 REAL(KIND=JPRB) :: ZRAINCLDM1(KLON)
 REAL(KIND=JPRB) :: ZSNOWRIME(KLON)
+REAL(KIND=JPRB) :: ZSECPROD(KLON)
 REAL(KIND=JPRB) :: ZSNOWCLD(KLON)
 REAL(KIND=JPRB) :: ZSNOWCLDM1(KLON)
 REAL(KIND=JPRB) :: ZESATLIQ
@@ -1214,6 +1222,7 @@ DO JK=NCLDTOP,KLEV
   ZRAINACC(:) = 0.0_JPRB  ! currently needed for diags  
   ZSNOWAUT(:) = 0.0_JPRB  ! needed                      
   ZSNOWRIME(:) = 0.0_JPRB
+  ZSECPROD(:) = 0.0_JPRB
   ZLDEFR(:)   = 0.0_JPRB                                
   ZACUST(:)   = 0.0_JPRB  ! set later when needed       
   ZQPRETOT(:) = 0.0_JPRB                                
@@ -3614,6 +3623,25 @@ ENDIF ! on ISUBLSNOW
     ENDDO
   ENDDO
 
+  ! Hallett-Mossop splinters from the cloud droplets actually rimed by snow.
+  IF (LSECPROD) THEN
+    DO JL=KIDIA,KFDIA
+      IF (ZTP1(JL,JK) > ZSEC_TMIN .AND. ZTP1(JL,JK) < ZSEC_TMAX .AND. &
+        & ZSNOWRIME(JL) > ZEPSEC .AND. ZQXN(JL,NCLDQL) > ZEPSEC .AND. &
+        & ZQXN(JL,NCLDQS) > ZEPSEC) THEN
+        ZSECPROD(JL) = ZSEC_SPLINTER_YIELD*ZSEC_ICE_MASS/ZSEC_DROP_MASS &
+          & * ZSNOWRIME(JL)*ZQXN(JL,NCLDQL)
+        ZSECPROD(JL) = MIN(MAX(ZSECPROD(JL),0._JPRB),ZQXN(JL,NCLDQS))
+        IF (ZSECPROD(JL) > ZEPSEC) THEN
+          ZQXN(JL,NCLDQS) = ZQXN(JL,NCLDQS)-ZSECPROD(JL)
+          ZQXN(JL,NCLDQI) = ZQXN(JL,NCLDQI)+ZSECPROD(JL)
+        ELSE
+          ZSECPROD(JL) = 0._JPRB
+        ENDIF
+      ENDIF
+    ENDDO
+  ENDIF
+
   !--------------------------------
   ! variables needed for next level
   !--------------------------------
@@ -3673,6 +3701,11 @@ ENDIF ! on ISUBLSNOW
     ZBUDI(JL,14)= -ZSNOWAUT(JL)*ZQXN(JL,NCLDQI)*ZQTMST
 
     PSNOWACL(JL,JK) = ZSNOWRIME(JL)*ZQXN(JL,NCLDQL)
+    PICEPROC(JL,JK,JPICE_FALL) = ZFALLSINK(JL,NCLDQI)
+    PICEPROC(JL,JK,JPICE_AGG) = ZSNOWAUT(JL)*ZQXN(JL,NCLDQI)
+    PICEPROC(JL,JK,JPICE_MELT) = MAX(0._JPRB,-ZBUDI(JL,15)*PTSPHY)
+    PICEPROC(JL,JK,JPICE_DETR) = MAX(0._JPRB,ZBUDI(JL,3)*PTSPHY)
+    PICEPROC(JL,JK,JPICE_SEC) = ZSECPROD(JL)
   ENDDO
 
 
