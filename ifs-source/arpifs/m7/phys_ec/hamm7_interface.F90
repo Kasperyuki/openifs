@@ -155,6 +155,7 @@ SUBROUTINE HAMM7_INTERFACE( &
 !-----------------------------------------------------------------------
 
 USE PARKIND1,     ONLY: JPIM, JPRB
+USE PAR_GFL,      ONLY: JPICNC_NPROC
 USE YOMHOOK,      ONLY: LHOOK, DR_HOOK, JPHOOK
 USE TYPE_MODEL,   ONLY: MODEL
 USE YOMCST,       ONLY: RD, RG, RPI
@@ -273,7 +274,7 @@ REAL(KIND=JPRB),INTENT(OUT)     :: PAEPM10(KLON)
 !*   0.5    LOCAL VARIABLES
 !           ---------------
 
-INTEGER(KIND=JPIM) :: JAER, JK, JL, JWAVL, JT, JB, JN
+INTEGER(KIND=JPIM) :: JAER, JK, JL, JWAVL, JT, JB, JN, JPROC
 INTEGER(KIND=JPIM) :: JEXT, ITRC, IKLEVTROP(KLON), IW
 INTEGER(KIND=JPIM) :: JO, JH, JY                         ! inside loop index for OIFS contex, HAM context and YAEROUT 
 INTEGER(KIND=JPIM) :: JCLASS, JTILE, JMASS, JGAS, JCLOUD ! local loop indice for activation and dry deposition and tracer indexing
@@ -359,7 +360,7 @@ REAL(KIND=JPRB) :: ZTKEM1(KLON,KLEV) !turbulent kinetic energy  as zero as it is
 REAL(KIND=JPRB) :: ZSIGMA_W(KLON,KLEV) !standard deviation of updraft pdf
 REAL(KIND=JPRB) :: ZSMAXMN(KLON,KLEV) !maximum supersaturation for M&N scheme
 REAL(KIND=JPRB) :: ZWCAPE(KLON) !CAPE  as zero as it is not used
-REAL(KIND=JPRB) :: ZCIRRUS_W(KLON,KLEV) ! cirrus nucleation updraft [cm/s]
+REAL(KIND=JPRB) :: ZUPD_W(KLON,KLEV) ! cirrus nucleation updraft [cm/s]
 REAL(KIND=JPRB) :: ZRDRY(KLON,KLEV,nclass) !dry radius for each class
 REAL(KIND=JPRB) :: ZESW(KLON,KLEV) !saturation water vapor pressure
 REAL(KIND=JPRB) :: ZA(KLON,KLEV,nclass) !curvature parameter A of the Koehler equation
@@ -412,6 +413,7 @@ REAL(KIND=JPRB) :: ZIPDUM(KLON,KLEV) !temporary variable for cloud ice water con
 REAL(KIND=JPRB) :: ZMFU(KLON,KLEV)  ! temporary variable for constraing Conv. mass flux up
 ! variables for ICNC calculations
 REAL(KIND=JPRB) :: ZICNC(KLON,KLEV) ! ice crystal number concentration [#/cm3]
+REAL(KIND=JPRB) :: ZICNC_PROC(KLON,KLEV,JPICNC_NPROC) ! Per-process ICNC changes [#/m3 per timestep]
 ! added here variables for dry deposition and sedimentation
 REAL(KIND=JPRB) :: ZTENCIH(KLON,KLEV,ntrac) !for HAM tendencies
 REAL(KIND=JPRB) :: ZAHFSM(KLON)
@@ -861,6 +863,7 @@ END DO
 !eehol: init CDNC and ICNC with non updated to temporary HAMM7 variables (unit in #/kg)
 ZCDNC_temp(KIDIA:KFDIA,1:KLEV) = (1.0E6_JPRB*PGFL(KIDIA:KFDIA,1:KLEV,YCDNC%MP9_PH))/ZRHO(KIDIA:KFDIA,1:KLEV)
 ZICNC_temp(KIDIA:KFDIA,1:KLEV) = (1.0E6_JPRB*PGFL(KIDIA:KFDIA,1:KLEV,YICNC%MP9_PH))/ZRHO(KIDIA:KFDIA,1:KLEV)
+ZICNC_PROC = 0._JPRB
 
 ! implementation of HAM-M7
 ZWND(KIDIA:KFDIA) = 0._JPRB
@@ -1046,7 +1049,7 @@ ENDDO
          ZFRACN(KIDIA:KFDIA,1:KLEV,JCLASS) = MERGE(ZFRACN(KIDIA:KFDIA,1:KLEV,JCLASS),0._JPRB,LLIQCLD(KIDIA:KFDIA,1:KLEV))
        ENDDO
 
-       ZCIRRUS_W(KIDIA:KFDIA,:) = -100._JPRB*PVERVEL(KIDIA:KFDIA,:) &
+       ZUPD_W(KIDIA:KFDIA,:) = -100._JPRB*PVERVEL(KIDIA:KFDIA,:) &
          & /(RG*ZRHO(KIDIA:KFDIA,:)) &
          & + 70._JPRB*SQRT(MAX(ZTKEM1(KIDIA:KFDIA,:),0._JPRB))
        IF (nic_cirrus == 2 .AND. lorocirrus) THEN
@@ -1056,14 +1059,18 @@ ENDDO
          CALL OIFS_OROCIRRUS_UPDRAFT( &
            & YDMODEL%YRML_PHY_SLIN%YREPHLI,YDMODEL%YRML_PHY_EC%YREGWD, &
            & KIDIA,KFDIA,KLON,KLEV,PRS1,PRSF1,PGEOM1,PTP0,PQP0,PUP,PVP, &
-           & PHSTD,POROGAM,POROTHE,POROSIG,ZRHO_RCP,PVERVEL,ZCIRRUS_W)
+           & PHSTD,POROGAM,POROTHE,POROSIG,ZRHO_RCP,PVERVEL,ZUPD_W)
        END IF
+
+       ! Preserve prognostic CDNC while adding only activation above that total.
+       ZCDNCACT(KIDIA:KFDIA,1:KLEV) = MAX(ZCDNCACT(KIDIA:KFDIA,1:KLEV), &
+         & ZCDNC_temp(KIDIA:KFDIA,1:KLEV)*ZRHO(KIDIA:KFDIA,1:KLEV))
 
        CALL ICE_INTERFACE( &
          & KIDIA,        KFDIA,        KLON,        KTDIA,        KLEV,             &
          & ICENUCL,      nic_cirrus,                                                &
          & PAP,          PIP,          PLP,         PTP,          PTP0,      PQP0,  &
-         & PRS1,         PRSF1,        PVERVEL,     ZCIRRUS_W,                       &
+         & PRS1,         PRSF1,        PVERVEL,     ZUPD_W,                       &
          & ZRHO,         ZAP,          ZTKEM1,                                        &
          & ZXTM1,        ZXTTE,        ZM6RP,                                         &
          & ZNACT,                                                                    &
@@ -1071,7 +1078,7 @@ ENDDO
          & PGFL(1:KLON,1:KLEV,YRE_ICE%MP9_PH),                                      &
          & LICECLD,      PSNOWACL,    PICEPROC,                                      &
          & RNICE,                                                                    &
-         & ZICNC,        ZCDNCACT )
+         & ZICNC,        ZCDNCACT,     ZICNC_PROC )
 
        ZCDNCACT(KIDIA:KFDIA,1:KLEV) = MERGE(ZCDNCACT(KIDIA:KFDIA,1:KLEV),1.0E6_JPRB*ZDEF_CDNC,LLIQCLD(KIDIA:KFDIA,1:KLEV)) !mask only values inside liq cloud
 
@@ -2085,14 +2092,17 @@ IF(.NOT.LIFSMIN  .AND. .NOT.LIFSTRAJ) THEN
     PGFL(KIDIA:KFDIA,JN,YAEROUT(39)%MP)=ZXTEMS(KIDIA:KFDIA,JN)
   END DO
 
-  !** YAEROUT(30) : --
-  !** YAEROUT(31) : --
-  !** YAEROUT(32) : --
-  !** YAEROUT(33) : --
-  !** YAEROUT(34) : --
-  !** YAEROUT(35) : --
-  !** YAEROUT(36) : --
-  !** YAEROUT(37) : --
+  !** YAEROUT(30:37) : DETR, MELT, FALL, AGG, SEC, CIRRUS, FREEZE, NMIX.
+  !** Per-process ICNC changes [#/cm3 per physics timestep].
+  IF (YGFL%NAEROUT < 37) THEN
+    CALL ABOR1('HAMM7_INTERFACE: NAEROUT must be at least 37 for ICNC diagnostics')
+  ELSE
+    DO JPROC=1,JPICNC_NPROC
+      PGFL(KIDIA:KFDIA,1:KLEV,YAEROUT(29+JPROC)%MP) = &
+        & 1.0E-6_JPRB*ZICNC_PROC(KIDIA:KFDIA,1:KLEV,JPROC)
+    END DO
+  END IF
+
   !** YAEROUT(38) : --
   !** YAEROUT(39) : --
   !** YAEROUT(46) 
